@@ -1,0 +1,439 @@
+---
+title: "Tables and Figures"
+output: word_document
+---
+
+```{r echo = FALSE, include = FALSE}
+# Load libraries
+library(tidyverse)
+library(knitr)
+library(scales)
+library(gridExtra)
+```
+
+```{r cache = TRUE, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, dev = "svg")
+
+# Load data
+files = list.files(path = "../data", pattern = ".Rds")
+
+for (i in 1:length(files)) {
+  file = paste("../data/", files[i], sep = "")
+  name = str_match(files[i], ".+?(?=[.]Rds)")
+  assign(name, readRDS(file))
+}
+
+rm(name, file, files, i)
+
+```
+
+
+# Tables
+
+## Trial Characteristics
+
+
+```{r echo = FALSE}
+gen_settings %>%
+  select(-c(sim_num, prior_probability)) %>%
+  mutate(name = gsub("anaes_0.[0-9]", "Low Event Rate", name),
+         name = gsub("icu_0.[0-9]", "High Event Rate", name),
+         control_event_rate = paste(control_event_rate * 100, "%", sep = ""),
+         effect_size = paste(effect_size * 100, "%", sep = ""),
+         n = round(n, 0)) %>%
+  relocate(name, control_event_rate, effect_size, alpha, power, n) %>%
+  rename(Group = name,
+         `Target Power` = power) %>%
+  rename_with(gsub, pattern = "_", replacement = " ") %>%
+  rename_with(str_to_title) %>%
+  kable(align = c("l", rep("r", length.out = 5)))
+
+
+```
+
+
+## Output Characteristics of Simulated Trials
+
+```{r echo = FALSE}
+tbl_output = function(df) {
+  df %>%
+  select(-c(total, total_true, total_false)) %>%
+  mutate(target_power = seq(0.1, 0.9, 0.1),
+         prob_pos_trial = paste(round(prob_pos_trial * 100, 0), "%", sep = ""),
+         prob_neg_trial = paste(round(prob_neg_trial * 100, 0), "%", sep = ""),
+         PPV = paste(round(PPV * 100, 0), "%", sep = ""),
+         FPR = paste(round(FPR * 100, 0), "%", sep = ""),
+         NPV = paste(round(NPV * 100, 0), "%", sep = ""),
+         FNR = paste(round(FNR * 100, 0), "%", sep = ""),
+         power = round(power, 2)) %>%
+  relocate(target_power) %>%
+  rename(achieved_power = power,
+         design_power = target_power) %>%
+  rename_with(gsub, pattern = "(pos$)|(pos_trial$)", replacement = "positive trial") %>%
+  rename_with(gsub, pattern = "(neg$)|(neg_trial$)", replacement = "negative trial") %>%
+  rename_with(gsub, pattern = "_", replacement = " ") %>%
+  rename_with(.cols = -c(PPV, FPR, NPV, FNR), str_to_title) %>%
+  rename_with(gsub, pattern = "Prob", replacement = "Probability of")
+}
+
+```
+
+
+```{r echo = FALSE}
+## Low Event Rate
+tab_anaes_sum = anaes_sum %>%
+  tbl_output() %>%
+  select(-`Achieved Power`) %>%
+  kable(align = c("l", rep("r", length.out = 11)),
+        caption = "Results of Simulated Low Event Rate Trials by Power Level")
+tab_anaes_sum
+```
+
+
+```{r echo = FALSE}
+## ICU
+tab_icu_sum = icu_sum %>%
+  tbl_output() %>%
+  select(-`Achieved Power`) %>%
+  kable(align = c("l", rep("r", length.out = 11)),
+        caption = "Results of Simulated High Event Rate Trials by Power Level")
+tab_icu_sum 
+```
+
+# Figures
+
+## Histograms
+```{r echo = FALSE}
+
+# fun_gghist generates a histogram
+fun_gghist = function(df, type){
+  # Tidy
+  df = df %>%
+    bind_rows() %>%
+    mutate(type = ifelse(type == "c_c", "Control", "Treatment"),
+           power_level = factor(power_level, levels = c(seq(0.9, 0.1, -0.1)))) %>%
+    rename(Assignment = type)
+  
+  # Calculate any additional values
+  stats = df %>%
+    group_by(Assignment) %>%
+    summarise(mean_p = mean(p_value),
+              n = n())
+  
+  # Make the graph from the df
+  gg = df %>%
+    ggplot(aes(x = p_value,
+               color = Assignment,
+               fill = Assignment)) +
+    geom_histogram(binwidth = 0.05,
+                   alpha = 0.5,
+                   position = "identity") +
+    facet_wrap(facets = vars(power_level),
+               ncol = 3) +
+    scale_y_continuous(labels = comma) +
+    theme_light() +
+    theme(legend.position = "bottom") +
+    labs(title = paste("Histogram of p-values in", type, "trials, by Design Power"),
+         x = "p-value",
+         y = "Number of Trials",
+         fill = NULL,
+         colour = NULL)
+  
+  # Modify the graph based on values in 'stats'
+  gg = gg +
+    geom_vline(data = stats,
+               aes(xintercept = mean_p,
+                   color = Assignment),
+               linetype = "dashed")
+  
+  # Return
+  gg
+}
+
+
+```
+
+### Low-Event Rate
+```{r fig.height = 16, fig.width = 8, echo = FALSE, message = FALSE}
+anaes_hist = fun_gghist(anaes_raw, type = "Low Event Rate")
+
+ggsave("ler_hist.jpg", anaes_hist, dpi = 600, width = 7, height = 9.5, units = "in")
+anaes_hist
+```
+
+### High-Event Rate
+
+```{r fig.height = 16, fig.width = 8, echo = FALSE, message = FALSE}
+icu_hist = fun_gghist(icu_raw, type = "High Event Rate")
+
+ggsave("her_hist.jpg", icu_hist, dpi = 600, width = 7, height = 9.5, units = "in")
+icu_hist
+
+```
+
+## False Positive Rates
+```{r echo = FALSE}
+
+#Function to generate FPR model and predictions
+fun_pred_fpr = function(df) {
+  #Take all those bins with an upper limit of the p-value bin of < 0.05, but use the mean value for that bin as the graphing point
+
+  df = filter(df, p_bin < 0.05)
+  
+  # Model and prediction intervals
+  ## Use log scale for consistency with FNR modeling, see the fun_pred_fnr function for other model attempts
+  m_fpr = lm(FPR ~ exp(p_bin_m), data = df)
+  pi_fpr = predict(m_fpr, interval = "prediction")
+  
+  # Smoosh together
+  df = bind_cols(df, as.data.frame(pi_fpr)) %>%
+    # Correct impossibles
+    mutate(lwr = ifelse(lwr < 0, 0, lwr),
+           upr = ifelse(upr > 1, 1, upr),
+           fit = ifelse(fit <= 0, NA, fit),
+           fit = ifelse(fit > 1, NA, fit))
+  df
+  
+}
+
+fun_ggfpr = function(df, type) {
+  #Generate vector for minor breaks on the log axis
+  mb = unique(as.numeric(1:10 %o% 10 ^ (0:7)))/10000000
+  
+  # Generate prediction intervals for each df
+  df = lapply(df, fun_pred_fpr)
+  
+  df = df %>%
+    bind_rows(.id = "power_level") %>%
+    mutate(power_level = as.factor(as.numeric(power_level)/10),
+           total = true_pos + true_neg + false_pos + false_neg)
+
+  gg = df %>%
+    ggplot(aes(x = p_bin_m,
+               y = FPR)) +
+    theme_light() +
+    theme(panel.spacing = unit(1, "lines")) +
+    labs(title = paste("Plot of p-values versus False Positive Rate in", type, "Trials, by Design Power"),
+         x = "p-value",
+         y = "FPR") +
+    facet_wrap(facets = vars(power_level),
+           ncol = 3) +
+    geom_vline(xintercept = 0.005,
+               linetype = "solid",
+               size = 0.5,
+               alpha = 0.3) +
+    geom_point(color = "black",
+               alpha = 0.5,
+               # Change shape to drop border
+               shape = 16) +
+    geom_line(aes(y = fit,
+                  color = "Line of Best Fit"),
+              size = 0.5,
+              linetype = "solid") +
+    scale_colour_manual(NULL, values = "dodgerblue3") +
+    geom_ribbon(aes(ymax = upr,
+                    ymin = lwr,
+                    fill = "95% Prediction Interval"),
+                alpha = 0.3) +
+    scale_fill_manual(NULL, values = "dodgerblue1") +
+    theme(legend.position = "bottom",
+          plot.margin = unit(c(1, 1, 1, 1), "cm")) +
+    guides(fill = guide_legend(order = 2),
+           colour = guide_legend(order = 1)) +
+    scale_y_continuous(labels = percent) +
+    scale_x_log10(breaks = c(0, 0.000001, 0.00001, 0.0001, 0.001, 0.005, 0.02, 0.05),
+                  labels = label_number(drop0trailing = TRUE),
+                  minor_breaks = mb) +
+    coord_cartesian(ylim = c(0, 1),
+                    expand = FALSE) +
+    # Add an invisible line so that the x axis extends to 0.05
+    geom_vline(xintercept = 0.05,
+       alpha = 0)
+
+  gg
+}
+
+```
+
+
+### Low-Event Rate
+```{r fig.height = 16, fig.width = 14, echo = FALSE, message = FALSE}
+
+anaes_fpr = fun_ggfpr(anaes_binned, "Low Event Rate")
+ggsave("ler_fpr.jpg", anaes_fpr, dpi = 600, width = 16, height = 10, units = "in")
+anaes_fpr
+
+```
+
+
+### High-Event Rate
+```{r fig.height = 16, fig.width = 14, echo = FALSE, message = FALSE}
+
+icu_fpr = fun_ggfpr(icu_binned, "High Event Rate")
+ggsave("her_fpr.jpg", icu_fpr, dpi = 600, width = 16, height = 10, units = "in")
+icu_fpr
+
+```
+
+
+## False Negative Rates
+```{r echo = FALSE}
+
+fun_pred_fnr = function(df) {
+  df = filter(df, p_bin >= 0.05)
+  
+  # Linear fitting
+  #m_fnr = lm(FNR ~ p_bin_m, data = df)
+  #pi_fnr = predict(m_fnr, interval = "prediction")
+  
+  # Log fitting
+  m_fnr = lm(FNR ~ log(p_bin_m), data = df)
+  pi_fnr = predict(m_fnr, interval = "prediction") #We use the same x values for the prediction so we can plot everything from the same dataframe
+  
+  df = bind_cols(df, as.data.frame(pi_fnr)) %>%
+    # Correct impossibles
+    mutate(lwr = ifelse(lwr < 0, 0, lwr),
+           upr = ifelse(upr > 1, 1, upr),
+           fit = ifelse(fit <= 0, NA, fit),
+           fit = ifelse(fit > 1, NA, fit))
+  df
+}
+
+fun_ggfnr = function(df, type) {
+  df = lapply(df, fun_pred_fnr)
+  
+  df = df %>%
+    bind_rows(.id = "power_level") %>%
+    mutate(power_level = factor(as.numeric(power_level)/10,
+                                levels = c("0.9", "0.8", "0.7", "0.6", "0.5", "0.4", "0.3", "0.2", "0.1")),
+           total = true_pos + true_neg + false_pos + false_neg)
+  
+  gg = df %>%
+    ggplot(aes(x = p_bin_m,
+               y = FNR)) +
+    theme_light() +
+    theme(panel.spacing = unit(1, "lines")) +
+    labs(title = paste("Plot of p-values versus False Negative Rate in", type, "Trials, by Design Power"),
+         x = "p-value",
+         y = "FNR") +
+    facet_wrap(facets = vars(power_level),
+               ncol = 3) +
+    geom_vline(xintercept = 0.5,
+               linetype = "solid",
+               size = 0.5,
+               alpha = 0.3) +
+    geom_point(color = "black",
+               alpha = 0.5,
+               shape = 16) +
+    geom_line(aes(y = fit,
+                  color = "Line of Best Fit"),
+              size = 0.5,
+              linetype = "solid") +
+    scale_colour_manual(NULL, values = "dodgerblue3") +
+    geom_ribbon(aes(ymax = upr,
+                    ymin = lwr,
+                    fill = "95% Prediction Interval"),
+                alpha = 0.3) +
+    scale_fill_manual(NULL, values = "dodgerblue1") +
+    theme(legend.position = "bottom") +
+    guides(fill = guide_legend(order = 2),
+           colour = guide_legend(order = 1)) +
+    scale_y_continuous(labels = percent) +
+    coord_cartesian(xlim = c(0.05, 1),
+                    ylim = c(0,1),
+                    expand = FALSE)
+  
+  gg
+}
+
+```
+
+
+### Low-Event Rate
+```{r fig.height = 16, fig.width = 14, echo = FALSE, message = FALSE}
+
+anaes_fnr = fun_ggfnr(anaes_binned, "Low Event Rate")
+ggsave("ler_fnr.jpg", anaes_fnr, dpi = 600, width = 16, height = 10, units = "in")
+anaes_fnr
+```
+
+
+### High-Event Rate
+```{r fig.height = 16, fig.width = 14, echo = FALSE, message = FALSE}
+
+icu_fnr = fun_ggfnr(icu_binned, "High Event Rate")
+ggsave("her_fnr.jpg", icu_fnr, dpi = 600, width = 16, height = 10, units = "in")
+icu_fnr
+```
+
+## Power Curves
+
+```{r echo = FALSE}
+power_curve = gen_settings %>%
+  mutate(effect_size = as.factor(effect_size),
+         name = gsub("_.*$", "", name),
+         name = ifelse(name == "anaes",
+                       "Low Event Rate",
+                       "High Event Rate")) %>%
+  ggplot(aes(x = n,
+             y = power,
+             linetype = name)) +
+  geom_line() +
+  scale_y_continuous(breaks = c(0.25, 0.5, 0.75, 0.8, 0.9),
+                     minor_breaks = NULL) +
+  theme_light() +
+  labs(title = "Power Curves",
+       x = "Sample Size",
+       y = "Design Power",
+       linetype = "Trial Parameters")
+
+power_curve
+ggsave("power.jpg", power_curve, dpi = 600, width = 7, height = 9.5, units = "in")
+
+```
+
+## Power Graph
+```{r echo = FALSE}
+
+t1 = tbl_output(anaes_sum) %>%
+  mutate(name = "Low Event Rate")
+
+t2 = tbl_output(icu_sum) %>%
+  mutate(name = "High Event Rate")
+
+t3 = full_join(t1, t2) %>%
+  select(name, `Achieved Power`, `Design Power`)
+
+t4 = gen_settings %>%
+  select(power, name, n) %>%
+  mutate(name = gsub("anaes_0.[0-9]", "Low Event Rate", name),
+         name = gsub("icu_0.[0-9]", "High Event Rate", name)) %>%
+  rename(`Design Power` = power)
+
+tab_pwr = full_join(t3, t4) %>%
+  rename(power_design = `Design Power`,
+         power_achieved = `Achieved Power`) %>%
+  pivot_longer(cols = starts_with("power"), names_to = "power_type", values_to = "power") %>%
+  mutate(power_type = ifelse(grepl("achieved", power_type),
+                                   "Achieved",
+                                   "Design"))
+
+rm(t1, t2, t3, t4)
+
+gg_pwr = ggplot(tab_pwr, aes(x = n,
+                             y = power,
+                             colour = power_type)) +
+  geom_point() +
+  geom_smooth() +
+  facet_wrap(facets = vars(name)) +
+  theme_light() +
+  guides(color=guide_legend(override.aes=list(fill=NA))) +
+  theme(panel.spacing = unit(1.5, "lines")) +
+    labs(title = paste("Achieved versus Design Power, Stratified by Simulation"),
+         x = "n",
+         y = "Power",
+         colour = "Power")
+
+ggsave("gg_pwr.jpg", dpi = 600, width = 7, height = 9.5, units = "in")
+gg_pwr
+```
